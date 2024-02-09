@@ -1,8 +1,24 @@
-
+"""
+https://github.dev/huggingface/diffusers/blob/main/examples/consistency_distillation/train_lcm_distill_lora_sdxl.py
+https://github.com/huggingface/accelerate/blob/main/examples/complete_cv_example.py
+"""
 
 '''
 dataset & dataloader
 '''
+
+import torch
+from accelerate import Accelerator
+
+
+
+# 유틸
+# torch.compile()이 되는 경우 고려해서
+def unwrap_model(model):
+    from diffusers.utils.torch_utils import is_compiled_module
+    model = accelerator.unwrap_model(model)
+    model = model._orig_mod if is_compiled_module(model) else model
+    return model
 
 
 '''
@@ -11,6 +27,17 @@ dataset & dataloader
 total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 global_step = 0
 first_epoch = 0
+
+
+optimizer = ...
+accelerator = Accelerator(gradient_accumulation_steps=..., # grad_acc
+                          )
+
+
+model, dataloader = accelerator.prepare(model, dataloader)
+
+
+
 
 '''
 resume code
@@ -63,8 +90,36 @@ for epcoh in range(first_epoch, args.num_train_epochs):
     for step, batch in enumerate(train_dataloader):
         progress_bar.set_description("Global step: {}".format(global_step))
         # grad acc + flash attention
-        with accelerator.accumulate(model), torch.backends.cuda.sdp_kernel(enable_flash=not args.disable_flashattention, enable_mem_efficient=not args.disable_flashattention, enable_math=True):
-            return_dict = model(batch, noise_scheduler)
-            loss = return_dict["loss"]
-            
-    
+        with accelerator.accumulate(model), torch.backends.cuda.sdp_kernel(enable_flash=not args.disable_flashattention, enable_mem_efficient=not args.disable_flashattention, enable_math=True):    
+            # Mixed precision
+            with accelerator.autocast():
+                return_dict = model(batch, noise_scheduler)
+                loss = return_dict["loss"]
+                loss = loss / self.gradient_accumulate_every
+                total_loss += loss.item()
+
+            accelerator.backward(loss)
+            if accelerator.sync_gradients:
+                accelerator.clip_grad_norm_(params, arg.max_grad_norm)
+            optimizer.step()
+            lr_scheduler.step()
+            optimizer.zero_grad(set_to_none=True)
+
+
+        if accelerator.sync_gradients:
+            # 저장할 때 global_step 기준
+            if accelerator.is_local_main_process:
+                if global_step % args.checkpointing_steps == 0:
+                    save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                    accelerator.save_state(save_path)
+
+
+# 모든 학습 끝나고 랭크0에서
+accelerator.wait_for_everyone()
+if accelerator.is_main_process:
+    # 특정 모델만 저장한다면
+    model = accelerator.unwrap_model(model)
+
+    # 허브 업로드
+    if args.push_to_hub:
+        
