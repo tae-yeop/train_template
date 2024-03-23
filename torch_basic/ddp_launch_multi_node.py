@@ -4,6 +4,13 @@ https://github.com/WongKinYiu/yolov7/blob/main/train.py
 https://github.com/CUBOX-Co-Ltd/cifar10_DDP_FSDP_DS
 https://github.com/zzh-tech/ESTRNN/blob/master/train/ddp.py
 https://pytorch.org/tutorials/intermediate/ddp_tutorial.html#initialize-ddp-with-torch-distributed-run-torchrun
+- https://github.com/Jeff-sjtu/HybrIK
+- https://github.com/open-mmlab/mmdetection
+- https://github.com/pytorch/examples/blob/main/imagenet
+- https://github.com/POSTECH-CVLab/PyTorch-StudioGAN
+- https://github.com/WongKinYiu/yolov7
+- https://github.com/michuanhaohao/AICITY2021_Track2_DMT/
+- https://github.com/IgorSusmelj/pytorch-styleguide
 """
 import os
 import numpy as np
@@ -25,12 +32,7 @@ import torchvision
 import torchvision.models as tvm
 import torchvision.transforms as transforms
 
-
-# Ampare architecture 30xx, a100, h100,..
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-# infernce
-# torch.set_grad_enabled(False)
+import argparse
 
 def set_random_seeds(random_seed=0):
     torch.manual_seed(random_seed)
@@ -39,21 +41,35 @@ def set_random_seeds(random_seed=0):
     np.random.seed(random_seed)
     random.seed(random_seed)
 
+def set_torch_backends(args):
+    # Ampare architecture 30xx, a100, h100,..
+    if torch.cuda.get_device_capability(0) >= (8, 0):
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("medium")
+    if args.inference : torch.set_grad_enabled(False)
+
 
 def train(model, train_loader, optimizer, criterion, epoch, rank, scaler=None, sampler=None):
+    """
+    1-epoch training loop
+    """
     model.train()
-    ddp_loss = torch.zeros(2, device='cuda') # torch.zeros(2).to('cuda')
+    # 새로운 텐서에도 pin memory 적용
+    # https://github.com/NVlabs/stylegan2-ada-pytorch/blob/main/training/training_loop.py
+    ddp_loss = torch.zeros(2, device='cuda').pin_memory() # torch.zeros(2).to('cuda')
     if sampler:
         sampler.set_epoch(epoch)
 
     train_loader = tqdm(train_loader, desc = f'Epoch {epoch}', leave=False) if rank == 0 else train_loader
     for idx, (inputs, labels) in enumerate(train_loader):
-        inputs = inputs.to('cuda', pin_memory=True, non_blocking=True)
-        labels = labels.to('cuda', pin_memory=True, non_blocking=True)
+        inputs = inputs.to('cuda', pin_memory=True, non_blocking=True) # inputs.cuda()
+        labels = labels.to('cuda', pin_memory=True, non_blocking=True) # labels.cuda()
         optimizer.zero_grad(set_to_none=True) # for param in model.parameters(): param.grad = None
 
-        output = model(inputs)
-        loss = criterion(output, labels)
+        with torch.cuda.amp.autocast():
+            output = model(inputs)
+            loss = criterion(output, labels)
         if scaler:
             loss = scaler.scale(loss)
             loss.backward()
@@ -78,7 +94,7 @@ def train(model, train_loader, optimizer, criterion, epoch, rank, scaler=None, s
 def test(model, test_loader, criterion, rank):
     model.eval()
     correct = 0
-    ddp_loss = torch.zeros(3, deviec='cuda') # ddp_loss = torch.zeros(3).to('cuda')
+    ddp_loss = torch.zeros(3, device='cuda').pin_memory() # ddp_loss = torch.zeros(3).to('cuda')
 
     if rank == 0:
         pbar = tqdm(range(len(test_loader)), colour='green', desc='Validation Epoch')
@@ -105,8 +121,6 @@ def test(model, test_loader, criterion, rank):
     return test_loss
 
 
-
-
 class Net(nn.Module):
     def __init__(self):
         super(Net, self).__init__()
@@ -127,6 +141,18 @@ class Net(nn.Module):
         return x
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--local_rank', type=int)
+    parser.add_argument("--num_epochs", type=int, help="Number of training epochs.")
+    parser.add_argument("--batch_size", type=int, help="Training batch size for one process.")
+    parser.add_argument("--learning_rate", type=float, help="Learning rate.")
+    parser.add_argument("--random_seed", type=int, help="Random seed.")
+    parser.add_argument("--model_dir", type=str, help="Directory for saving models.")
+    parser.add_argument("--model_filename", type=str, help="Model filename.")
+    parser.add_argument("--resume", action="store_true", help="Resume training from saved checkpoint.")
+    parser.add_argument("--inference", action="store_true", help="Inference mode")
+
+    args = parser.parse_args()
 
     # ============================ Distributed Setting ============================
     # 디폴트 init_method 'env://' 사용
@@ -137,17 +163,23 @@ if __name__ == '__main__':
     torch.cuda.set_device(local_rank)
     device = torch.device('cuda', local_rank)
 
-    seed = 99
+
+    # ============================ Basic Setting ==================================
+    seed = args.random_seed
     if seed is not None:
         set_random_seeds(seed) 
+
+    set_torch_backends(args)
     
-    # ============================ Dataset ============================
+    # ============================ Dataset =========================================
+
+    assert args.batch_size % world_size == 0, '--batch-size must be multiple of CUDA device count'
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     ])
 
-
+    
     if dist.get_rank() != 0:
         dist.barrier()
 
@@ -169,22 +201,21 @@ if __name__ == '__main__':
 
 
 
-    # ============================ Models ============================
-    model = Net()
-    model.to(device)
+    # ============================ Models ============================================
+    model = Net().to(device)
     model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
     # model = DDP(model, device_ids=[local_rank], 
     #             output_device=local_rank,
     #             find_unused_parameters=isinstance(layer, nn.MultiheadAttention) for layer in model.modules())
     # nn.MultiheadAttention incompatibility with DDP https://github.com/pytorch/pytorch/issues/26698
     
-    # ============================ Traning setup ============================
+    # ============================ Traning setup ======================================
 
     loss = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=5e-4)
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
 
-    # ============================ Resume setup ============================
+    # ============================ Resume setup ========================================
     ckpt_dir = None
     ckpt_filename = None
     resume = False
@@ -205,7 +236,7 @@ if __name__ == '__main__':
     init_end_event = torch.cuda.Event(enable_timing=True)
     init_start_event.record()
 
-    # ============================ Train ============================
+    # ============================ Train ==============================================
     for epoch in range(10):
         train(model, train_loader, optimizer, loss, epoch, global_rank, train_sampler)
         test()
@@ -223,16 +254,3 @@ if __name__ == '__main__':
     if global_rank==0:
         print(f"CUDA event elapsed time: {init_start_event.elapsed_time(init_end_event) / 1000}sec")
     dist.destroy_process_group()
-
-
-# parser = argparse.ArgumentParser()
-# parser.add_argument('--local_rank', type=int)
-# parser.add_argument("--num_epochs", type=int, help="Number of training epochs.")
-# parser.add_argument("--batch_size", type=int, help="Training batch size for one process.")
-# parser.add_argument("--learning_rate", type=float, help="Learning rate.")
-# parser.add_argument("--random_seed", type=int, help="Random seed.", default=0)
-# parser.add_argument("--model_dir", type=str, help="Directory for saving models.")
-# parser.add_argument("--model_filename", type=str, help="Model filename.")
-# parser.add_argument("--resume", action="store_true", help="Resume training from saved checkpoint.")
-
-#   args = parser.parse_args()

@@ -1,4 +1,7 @@
+"""
 
+https://github.com/rosinality/stylegan2-pytorch/blob/master/train.py
+"""
 import torch
 from torch.utils.data import Dataset
 
@@ -80,3 +83,16 @@ class FileNameClassDataset(Dataset):
         # cat_1234.jpg => cat
         return re.search(r"^(.*)_\d+\.jpg$", stem).groups()[0]
 
+
+
+from torchvision.transforms import (RandomCrop, CenterCrop, RandomHorizontalFlip, Resize, 
+                                    ToTensor, Normalize, Compose)
+
+transform = Compose([RandomHorizontalFlip(), ToTensor(),
+                     Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True)])
+
+
+# RandomCrop(32, padding=4) : 32x32 이미지를 40x40으로 만들고 32x32만큼 Crop한다.
+# Resize(antialias=True) : 
+# ToTensor() : [0, 255]에서 [0.0, 1.0]으로 스케일링하여 텐서를 리턴한다
+# PILToTensor() : PIL(H,W,C)를 Tensor(C, H, W)로 바꿈
