@@ -12,11 +12,19 @@ https://pytorch.org/tutorials/intermediate/ddp_tutorial.html#initialize-ddp-with
 - https://github.com/michuanhaohao/AICITY2021_Track2_DMT/
 - https://github.com/IgorSusmelj/pytorch-styleguide
 """
+"""
+실행시 torch_basic까지 와서 스크립트를 실행한다고 가정
+즉, working dir가 torch_basic까지 포함
+"""
+import sys
 import os
 import numpy as np
 import random 
 from tqdm import tqdm
-
+# -----------------------------------------------------------------------------
+# Path setting
+# -----------------------------------------------------------------------------
+sys.path.append(os.path.join(os.getcwd(), '..'))
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -34,20 +42,7 @@ import torchvision.transforms as transforms
 
 import argparse
 
-def set_random_seeds(random_seed=0):
-    torch.manual_seed(random_seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    np.random.seed(random_seed)
-    random.seed(random_seed)
-
-def set_torch_backends(args):
-    # Ampare architecture 30xx, a100, h100,..
-    if torch.cuda.get_device_capability(0) >= (8, 0):
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        torch.set_float32_matmul_precision("medium")
-    if args.inference : torch.set_grad_enabled(False)
+from training.general import set_random_seeds, set_torch_backends, get_args, save_args_to_yaml, get_logger
 
 
 def train(model, train_loader, optimizer, criterion, epoch, rank, scaler=None, sampler=None):
@@ -57,7 +52,7 @@ def train(model, train_loader, optimizer, criterion, epoch, rank, scaler=None, s
     model.train()
     # 새로운 텐서에도 pin memory 적용
     # https://github.com/NVlabs/stylegan2-ada-pytorch/blob/main/training/training_loop.py
-    ddp_loss = torch.zeros(2, device='cuda').pin_memory() # torch.zeros(2).to('cuda')
+    ddp_loss = torch.zeros(2, device='cuda') # torch.zeros(2).to('cuda')
     if sampler:
         sampler.set_epoch(epoch)
 
@@ -94,7 +89,7 @@ def train(model, train_loader, optimizer, criterion, epoch, rank, scaler=None, s
 def test(model, test_loader, criterion, rank):
     model.eval()
     correct = 0
-    ddp_loss = torch.zeros(3, device='cuda').pin_memory() # ddp_loss = torch.zeros(3).to('cuda')
+    ddp_loss = torch.zeros(3, device='cuda') # ddp_loss = torch.zeros(3).to('cuda')
 
     if rank == 0:
         pbar = tqdm(range(len(test_loader)), colour='green', desc='Validation Epoch')
@@ -141,18 +136,7 @@ class Net(nn.Module):
         return x
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--local_rank', type=int)
-    parser.add_argument("--num_epochs", type=int, help="Number of training epochs.")
-    parser.add_argument("--batch_size", type=int, help="Training batch size for one process.")
-    parser.add_argument("--learning_rate", type=float, help="Learning rate.")
-    parser.add_argument("--random_seed", type=int, help="Random seed.")
-    parser.add_argument("--model_dir", type=str, help="Directory for saving models.")
-    parser.add_argument("--model_filename", type=str, help="Model filename.")
-    parser.add_argument("--resume", action="store_true", help="Resume training from saved checkpoint.")
-    parser.add_argument("--inference", action="store_true", help="Inference mode")
-
-    args = parser.parse_args()
+    args = get_args()
 
     # ============================ Distributed Setting ============================
     # 디폴트 init_method 'env://' 사용
@@ -170,6 +154,10 @@ if __name__ == '__main__':
         set_random_seeds(seed) 
 
     set_torch_backends(args)
+
+    if args.wandb and global_rank == 0:
+        wandb.init(project=)
+
     
     # ============================ Dataset =========================================
 
